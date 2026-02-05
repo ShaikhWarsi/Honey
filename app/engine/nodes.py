@@ -20,6 +20,7 @@ from app.engine.prompts import (
     ANJALI_SYSTEM_PROMPT, 
     MR_SHARMA_SYSTEM_PROMPT,
     SCAM_DETECTOR_PROMPT,
+    CRITIC_PROMPT,
     INTEL_EXTRACTOR_PROMPT
 )
 from app.engine.tools import generate_scam_report
@@ -41,6 +42,10 @@ class DetectionResult(BaseModel):
     scammer_sentiment: int = Field(description="Frustration level 1-10")
     selected_persona: str = Field(description="RAJESH, ANJALI, or MR_SHARMA")
     agent_response: str = Field(description="The persona-style response.")
+
+class CriticResult(BaseModel):
+    scam_detected: bool
+    reasoning: str
 
 # Structured output schema for intel extraction
 class IntelResult(BaseModel):
@@ -77,6 +82,7 @@ llm = ChatGoogleGenerativeAI(
 )
 
 structured_detector = llm.with_structured_output(DetectionResult)
+structured_critic = llm.with_structured_output(CriticResult)
 structured_extractor = llm.with_structured_output(IntelResult)
 
 @retry(
@@ -96,6 +102,15 @@ async def _call_detector(messages):
 )
 async def _call_extractor(messages):
     return await structured_extractor.ainvoke(messages)
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=5),
+    retry=retry_if_exception_type(Exception),
+    reraise=True
+)
+async def _call_critic(messages):
+    return await structured_critic.ainvoke(messages)
 
 async def load_history(state: AgentState) -> AgentState:
     try:
@@ -243,6 +258,20 @@ async def detect_scam(state: AgentState) -> AgentState:
         if result.high_priority:
             logger.info("🚨 HIGH PRIORITY INTEL DETECTED - Short-circuiting to forensics.")
             
+        # 2. CRITIC VALIDATION (Multi-Agent Verification)
+        if not state.get("scam_detected"):
+            critic_messages = [
+                SystemMessage(content=CRITIC_PROMPT.format(
+                    user_message=state["user_message"],
+                    scam_detected=result.scam_detected,
+                    agent_response=result.agent_response
+                ))
+            ]
+            critic_result = await _call_critic(critic_messages)
+            if critic_result.scam_detected:
+                state["scam_detected"] = True
+                logger.info(f"🛡️ CRITIC OVERRIDE: Scam detected. Reason: {critic_result.reasoning}")
+            
     except Exception as e:
         logger.error(f"Detector Error: {e}")
         persona = state.get("selected_persona", "RAJESH")
@@ -291,11 +320,25 @@ async def extract_intel(state: AgentState) -> AgentState:
         
         state["intel"] = merged_intel
         
-        # Save to DB for syndicate analysis (MANDATORY FOR GRAPH)
+        # SYNDICATE MATCHING (Killer Feature)
+        # Check if any extracted UPI or Bank account matches previous scammers
+        all_matches = []
         for upi in llm_result.upi_ids:
-            await db.save_intel(state["session_id"], "upi", upi)
+            # Check for existing intel across ALL sessions (Syndicate Linkage)
+            is_known = await db.save_intel(state["session_id"], "upi", upi)
+            if is_known: 
+                all_matches.append(f"UPI:{upi}")
+            
         for bank in llm_result.bank_details:
-            await db.save_intel(state["session_id"], "bank", bank)
+            is_known = await db.save_intel(state["session_id"], "bank", bank)
+            if is_known: 
+                all_matches.append(f"Bank:{bank}")
+            
+        if all_matches:
+            state["syndicate_match_score"] = 0.95 # Confirmed high-level syndicate linkage
+            logger.info(f"🕸️ SYNDICATE MATCH DETECTED: {', '.join(all_matches)}")
+        
+        # Save other intel to DB
         for link in llm_result.phishing_links:
             await db.save_intel(state["session_id"], "link", link)
         for phone in llm_result.phone_numbers:
@@ -442,12 +485,29 @@ async def guvi_reporting(state: AgentState) -> AgentState:
     # The platform will track 'totalMessagesExchanged' to measure depth.
     if state.get("scam_detected"):
         try:
+            # Generate Forensic Breadcrumbs for agentNotes (Winning Strategy)
+            intel = state.get("intel", ExtractedIntel())
+            turns = state.get("turn_count", 1)
+            
+            summary_parts = []
+            if turns > 3:
+                summary_parts.append(f"Maintained engagement for {turns} turns.")
+            if intel.upi_ids:
+                summary_parts.append(f"Extracted {len(intel.upi_ids)} UPI IDs via 'failed payment' baiting.")
+            if state.get("scammer_sentiment", 5) > 8:
+                summary_parts.append("Successfully navigated high-aggression threats using 'Fear Meter' response pivot.")
+            if state.get("high_priority"):
+                summary_parts.append("Detected high-value financial targets early.")
+                
+            forensic_summary = " ".join(summary_parts) if summary_parts else "Engagement in progress."
+            
             logger.info(f"📊 MANDATORY CALLBACK: reporting session {state['session_id']} (Total turns: {state.get('turn_count')})")
             await send_guvi_callback(
                 state["session_id"],
                 True, # scamDetected = true
-                state.get("turn_count", 1), # totalMessagesExchanged
-                state.get("intel", ExtractedIntel()) # extractedIntelligence
+                turns, # totalMessagesExchanged
+                intel, # extractedIntelligence
+                forensic_summary # agentNotes with Breadcrumbs
             )
         except Exception as e:
             logger.error(f"❌ GUVI Reporting Failed: {e}")

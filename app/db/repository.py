@@ -75,16 +75,29 @@ class HoneyDB:
                 (session_id, 1 if is_scam else 0, datetime.now())
             )
 
-    async def save_intel(self, session_id: str, intel_type: str, value: str):
+    async def save_intel(self, session_id: str, intel_type: str, value: str) -> bool:
+        """
+        Saves intelligence and returns True if this value was already known
+        from a DIFFERENT session (Syndicate Detection).
+        """
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(self.executor, self._save_intel_sync, session_id, intel_type, value)
+        return await loop.run_in_executor(self.executor, self._save_intel_sync, session_id, intel_type, value)
 
-    def _save_intel_sync(self, session_id: str, intel_type: str, value: str):
+    def _save_intel_sync(self, session_id: str, intel_type: str, value: str) -> bool:
         with sqlite3.connect(self.db_path) as conn:
+            # Check for existing intel from other sessions
+            cursor = conn.execute(
+                "SELECT COUNT(*) FROM extracted_intel WHERE type = ? AND value = ? AND session_id != ?",
+                (intel_type, value, session_id)
+            )
+            is_syndicate = cursor.fetchone()[0] > 0
+            
+            # Save current intel
             conn.execute(
                 "INSERT INTO extracted_intel (session_id, type, value, timestamp) VALUES (?, ?, ?, ?)",
                 (session_id, intel_type, value, datetime.now())
             )
+            return is_syndicate
 
     async def get_context(self, session_id: str, limit: int = 10) -> List[Dict]:
         loop = asyncio.get_event_loop()

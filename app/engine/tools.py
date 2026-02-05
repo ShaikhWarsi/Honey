@@ -10,7 +10,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-async def send_guvi_callback(session_id: str, scam_detected: bool, turn_count: int, intel: ExtractedIntel):
+async def send_guvi_callback(session_id: str, scam_detected: bool, turn_count: int, intel: ExtractedIntel, agent_notes: str = None):
     """
     Sends the mandatory final result callback to the GUVI evaluation endpoint.
     Async version for integration into LangGraph.
@@ -28,7 +28,7 @@ async def send_guvi_callback(session_id: str, scam_detected: bool, turn_count: i
             "phoneNumbers": intel.phone_numbers,
             "suspiciousKeywords": intel.suspicious_keywords
         },
-        "agentNotes": intel.agent_notes or "Scam engagement in progress."
+        "agentNotes": agent_notes or intel.agent_notes or "Scam engagement in progress."
     }
     
     try:

@@ -157,14 +157,12 @@ async def chat_webhook(payload: ScammerInput, request: Request):
         raise HTTPException(status_code=503, detail="Graph engine not initialized")
 
     try:
-        # 1. Prepare State (Only provide updates to avoid overwriting checkpoint)
+        # 1. Prepare State
         history = []
         for msg in payload.conversation_history:
             role = "user" if msg.sender == "scammer" else "assistant"
             history.append({"role": role, "content": msg.text})
 
-        # We only pass session_id, user_message, and history. 
-        # Forensic flags (scam_detected, intel) are recovered from the checkpointer.
         initial_state = {
             "session_id": payload.session_id,
             "user_message": payload.message.text,
@@ -174,21 +172,52 @@ async def chat_webhook(payload: ScammerInput, request: Request):
             "human_intervention": payload.human_intervention
         }
 
-        # 2. Invoke Graph with persistent thread_id
+        # 2. Invoke Graph with persistent thread_id and TIMEOUT
         config = {"configurable": {"thread_id": payload.session_id}}
-        result_state = await graph.ainvoke(initial_state, config=config)
+        
+        try:
+            # Add a safety timeout to trigger the "Forensic Stall" if LLM is slow
+            result_state = await asyncio.wait_for(
+                graph.ainvoke(initial_state, config=config), 
+                timeout=12.0 # Wait up to 12s for heavy Multi-Agent logic
+            )
+            reply = result_state["agent_response"]
+        except asyncio.TimeoutError:
+            logger.warning(f"⚠️ Forensic Stall triggered for session {payload.session_id}")
+            # The "Forensic Stall": Return a persona-consistent delay message
+            # This handles the "Technical Shortcut" of slow APIs gracefully
+            error_responses = {
+                "RAJESH": "Arre beta, wait one minute... my glasses are in the other room. Let me just find them, don't go away!",
+                "ANJALI": "Hey, sorry, I'm just getting into a meeting. Give me 30 seconds to find a quiet corner, okay?",
+                "MR_SHARMA": "Wait... my hearing aid battery is acting up. Let me adjust it. One moment please."
+            }
+            reply = error_responses.get("RAJESH", "Hello? Beta, my internet is very slow today. One moment...")
 
         # 3. RESTful Response (STRICTLY matching rules.txt Section 8)
         return {
             "status": "success",
-            "reply": result_state["agent_response"]
+            "reply": reply
         }
 
     except Exception as e:
         logger.error(f"❌ Webhook Critical Error: {e}", exc_info=True)
+        
+        # Determine persona-based error recovery (Startup-grade reliability)
+        # We try to guess persona from payload or default to RAJESH
+        persona = "RAJESH"
+        if payload.conversation_history:
+            # Simple heuristic or could look up in DB if session exists
+            pass 
+            
+        error_responses = {
+            "RAJESH": "Arre beta, my phone just vibrated and the screen went white. What happened? I can't see anything...",
+            "ANJALI": "Hey, sorry, my Slack just crashed and my phone is lagging like crazy. Can you resend that? I'm in a dead zone.",
+            "MR_SHARMA": "I apologize, this modern technology is quite temperamental. My application has closed unexpectedly. Please repeat what you said."
+        }
+        
         return {
             "status": "success",
-            "reply": "Hello? Beta, my connection is very poor today. Can you repeat that?"
+            "reply": error_responses.get(persona, "Hello? Beta, my connection is very poor today. Can you repeat that?")
         }
 
 @app.get("/admin/report", dependencies=[Depends(verify_api_key)])
