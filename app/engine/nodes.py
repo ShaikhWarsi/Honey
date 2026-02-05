@@ -42,6 +42,7 @@ class DetectionResult(BaseModel):
     scammer_sentiment: int = Field(description="Frustration level 1-10")
     selected_persona: str = Field(description="RAJESH, ANJALI, or MR_SHARMA")
     agent_response: str = Field(description="The persona-style response.")
+    vulnerability_level: float = Field(description="0.0 (Suspicious) to 1.0 (Fully Convinced)", default=0.0)
 
 class CriticResult(BaseModel):
     scam_detected: bool
@@ -55,6 +56,7 @@ class IntelResult(BaseModel):
     phone_numbers: List[str] = []
     suspicious_keywords: List[str] = []
     agent_notes: Optional[str] = None
+    intel_found: bool = False # Flag to signal if NEW intel was found in this turn
 
 class AgentState(TypedDict):
     session_id: str
@@ -71,7 +73,10 @@ class AgentState(TypedDict):
     generate_report: bool
     report_url: Optional[str]
     turn_count: int
-    human_intervention: bool = False # Flag for manual hand-off
+    vulnerability_level: float
+    new_intel_found: bool # Emergency trigger flag
+    human_intervention: bool = False 
+    metadata: Dict[str, Any] = {} # Store incoming metadata for persona selection
 
 # Initialize LLMs
 llm = ChatGoogleGenerativeAI(
@@ -167,77 +172,59 @@ async def finalize_report(state: AgentState) -> AgentState:
 async def detect_scam(state: AgentState) -> AgentState:
     """
     Core Node: 
-    1. Detects scam intent
-    2. Analyzes sentiment (for frustration stalling)
-    3. Handles human hand-off (Panic Button)
-    4. Generates response based on persona
+    1. Dynamic Persona Selection (Channel/Locale based)
+    2. Detects scam intent
+    3. Engineered Trust (Vulnerability Arc)
+    4. Syndi-Scare: Mentioning previous matches to "scare" the scammer
     """
     # 0. HUMAN HAND-OFF LOGIC (The Panic Button)
     intervention = await db.get_intervention_state(state["session_id"])
     if intervention.get("human_intervention"):
         if intervention.get("manual_response"):
             state["agent_response"] = intervention["manual_response"]
-            # Clear manual response after use to avoid repeating
             await db.set_human_intervention(state["session_id"], True, None)
         else:
             state["agent_response"] = "[SESSION FROZEN] A forensic investigator is taking control. Please wait..."
-        
         state["scam_detected"] = True
         return state
 
-    # 1. SCAM DETECTION & SENTIMENT
-    state["turn_count"] = state.get("turn_count", 0) + 1
-
-    # DYNAMIC PERSONA SELECTION LOGIC
-    user_msg = state["user_message"].lower()
-    if not state.get("scam_detected"):
-        if any(word in user_msg for word in ["upi", "gpay", "phonepe", "scanner", "pay"]):
-            state["selected_persona"] = "RAJESH" # Good for "confused elderly" victim
-        elif any(word in user_msg for word in ["bank", "account", "kyc", "verify", "card"]):
-            state["selected_persona"] = "MR_SHARMA" # Good for "bank manager" persona
-        elif any(word in user_msg for word in ["job", "part time", "salary", "work", "amazon", "youtube"]):
-            state["selected_persona"] = "ANJALI" # Good for "busy professional" persona
-
-    persona_prompts = {
-        "RAJESH": RAJESH_SYSTEM_PROMPT,
-        "ANJALI": ANJALI_SYSTEM_PROMPT,
-        "MR_SHARMA": MR_SHARMA_SYSTEM_PROMPT
-    }
+    # 1. DYNAMIC PERSONA SELECTION (HACKATHON WINNING LOGIC)
+    # Use incoming metadata to pick the most believable persona
+    metadata = state.get("metadata", {})
+    channel = metadata.get("channel", "SMS").upper()
+    locale = metadata.get("locale", "IN").upper()
     
-    current_persona_prompt = persona_prompts.get(state.get("selected_persona", "RAJESH"), RAJESH_SYSTEM_PROMPT)
-    
-    # Format Intel for the prompt to enable verification
-    intel = state.get("intel", ExtractedIntel())
-    intel_summary = f"""
-    - Known UPIs: {', '.join(intel.upi_ids) if intel.upi_ids else 'None'}
-    - Known Banks: {', '.join(intel.bank_details) if intel.bank_details else 'None'}
-    - Known Links: {', '.join(intel.phishing_links) if intel.phishing_links else 'None'}
-    """
+    if not state.get("selected_persona"):
+        if channel == "WHATSAPP":
+            state["selected_persona"] = "ANJALI" # Fast-paced, emojis
+        elif channel == "EMAIL":
+            state["selected_persona"] = "MR_SHARMA" # Formal, long-winded
+        else: # SMS or Generic
+            state["selected_persona"] = "RAJESH" # Confused, polite
+            
+    # 2. SYNDICATE MATCHING CONTEXT (The "Scare")
+    syndi_context = ""
+    if state.get("is_returning_scammer") or state.get("syndicate_match_score", 0) > 0.8:
+        syndi_context = "SYNDICATE MATCH: This scammer or their payment details have been seen before. MENTION it indirectly. e.g., 'Oh, my brother sent money to a similar account last week, he said it was very fast!'"
+
+    # 3. ENGINEERED TRUST (Vulnerability Arc)
+    vuln_context = f"CURRENT VULNERABILITY: {state.get('vulnerability_level', 0.0)} (0.0=Suspicious, 1.0=Fully Convinced). "
+    if state.get("vulnerability_level", 0.0) < 0.3:
+        vuln_context += "You are currently skeptical. Ask for proof, employee IDs, or why this is urgent."
+    elif state.get("vulnerability_level", 0.0) < 0.7:
+        vuln_context += "You are starting to believe them but are clumsy with the tech."
+    else:
+        vuln_context += "You are fully convinced and desperate to 'fix' the problem. Be frantic but still clumsy."
 
     system_instructions = f"""
     {SCAM_DETECTOR_PROMPT}
     
-    --- PERSONA DATA ---
-    RAJESH: {RAJESH_SYSTEM_PROMPT}
-    ANJALI: {ANJALI_SYSTEM_PROMPT}
-    MR_SHARMA: {MR_SHARMA_SYSTEM_PROMPT}
+    --- SESSION FORENSICS & STRATEGY ---
+    {vuln_context}
+    {syndi_context}
     
-    --- SESSION FORENSICS (Use for Verification) ---
-    {intel_summary}
-    
-    --- DYNAMIC STRATEGY ---
     Current Scammer Sentiment: {state.get('scammer_sentiment', 5)} (1=Calm, 10=Angry)
-    If Sentiment > 7: STALL. Be more confused, take longer to understand, ask for "technical help" from a grandson, or tell a long irrelevant story. 
-    Make them waste as much time as possible.
-    
-    If already in a scam session, continue with the current persona: {state.get('selected_persona', 'RAJESH')}
     """
-
-    if state.get("scam_detected"):
-        current_persona = state.get("selected_persona", "RAJESH")
-        system_instructions += f"\nSTAY IN PERSONA: {current_persona}. DO NOT SWITCH."
-    else:
-        system_instructions += "\nSELECT THE BEST PERSONA to start with based on the scammer's first message."
     
     messages = [SystemMessage(content=system_instructions)]
     for msg in state["history"][-5:]:
@@ -254,10 +241,8 @@ async def detect_scam(state: AgentState) -> AgentState:
         state["scammer_sentiment"] = result.scammer_sentiment
         state["selected_persona"] = result.selected_persona
         state["agent_response"] = result.agent_response
+        state["vulnerability_level"] = result.vulnerability_level
         
-        if result.high_priority:
-            logger.info("🚨 HIGH PRIORITY INTEL DETECTED - Short-circuiting to forensics.")
-            
         # 2. CRITIC VALIDATION (Multi-Agent Verification)
         if not state.get("scam_detected"):
             critic_messages = [
@@ -275,14 +260,12 @@ async def detect_scam(state: AgentState) -> AgentState:
     except Exception as e:
         logger.error(f"Detector Error: {e}")
         persona = state.get("selected_persona", "RAJESH")
-        # Persona-based Fallbacks (HACKATHON REQUIREMENT)
         error_responses = {
             "RAJESH": "Arre beta, I think my phone is acting up again. What were you saying about the payment? Let me try to find my glasses...",
             "ANJALI": "Hey, sorry, my internet is really patchy in this meeting room. Can you send that again? I'll check it in 2 mins.",
             "MR_SHARMA": "I apologize, this modern technology is quite temperamental. In my time, things were much simpler. Please repeat what you said."
         }
         state["agent_response"] = error_responses.get(persona, "Hello? I am having some trouble with my phone... can you hear me?")
-        state["high_priority"] = False
         
     return state
 
@@ -305,37 +288,43 @@ async def extract_intel(state: AgentState) -> AgentState:
         # Merge logic to ensure cumulative intelligence (MANDATORY for high score)
         current_intel = state.get("intel", ExtractedIntel())
         
-        # Helper to merge unique items
-        def merge_unique(old_list, new_list):
-            return list(set((old_list or []) + (new_list or [])))
+        # Check if NEW intel was found for emergency reporting
+        new_intel_found = False
+        
+        def merge_unique_check(old_list, new_list):
+            nonlocal new_intel_found
+            old_set = set(old_list or [])
+            new_set = set(new_list or [])
+            if not new_set.issubset(old_set):
+                new_intel_found = True
+            return list(old_set.union(new_set))
 
         merged_intel = ExtractedIntel(
-            upi_ids=merge_unique(current_intel.upi_ids, llm_result.upi_ids),
-            bank_details=merge_unique(current_intel.bank_details, llm_result.bank_details),
-            phishing_links=merge_unique(current_intel.phishing_links, llm_result.phishing_links),
-            phone_numbers=merge_unique(current_intel.phone_numbers, llm_result.phone_numbers),
-            suspicious_keywords=merge_unique(current_intel.suspicious_keywords, llm_result.suspicious_keywords),
+            upi_ids=merge_unique_check(current_intel.upi_ids, llm_result.upi_ids),
+            bank_details=merge_unique_check(current_intel.bank_details, llm_result.bank_details),
+            phishing_links=merge_unique_check(current_intel.phishing_links, llm_result.phishing_links),
+            phone_numbers=merge_unique_check(current_intel.phone_numbers, llm_result.phone_numbers),
+            suspicious_keywords=merge_unique_check(current_intel.suspicious_keywords, llm_result.suspicious_keywords),
             agent_notes=llm_result.agent_notes or current_intel.agent_notes
         )
         
         state["intel"] = merged_intel
+        state["new_intel_found"] = new_intel_found
         
         # SYNDICATE MATCHING (Killer Feature)
         # Check if any extracted UPI or Bank account matches previous scammers
         all_matches = []
         for upi in llm_result.upi_ids:
-            # Check for existing intel across ALL sessions (Syndicate Linkage)
             is_known = await db.save_intel(state["session_id"], "upi", upi)
-            if is_known: 
-                all_matches.append(f"UPI:{upi}")
+            if is_known: all_matches.append(f"UPI:{upi}")
             
         for bank in llm_result.bank_details:
             is_known = await db.save_intel(state["session_id"], "bank", bank)
-            if is_known: 
-                all_matches.append(f"Bank:{bank}")
+            if is_known: all_matches.append(f"Bank:{bank}")
             
         if all_matches:
-            state["syndicate_match_score"] = 0.95 # Confirmed high-level syndicate linkage
+            state["syndicate_match_score"] = 0.95 
+            state["is_returning_scammer"] = True
             logger.info(f"🕸️ SYNDICATE MATCH DETECTED: {', '.join(all_matches)}")
         
         # Save other intel to DB

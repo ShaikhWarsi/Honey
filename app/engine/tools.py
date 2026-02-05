@@ -31,9 +31,14 @@ async def send_guvi_callback(session_id: str, scam_detected: bool, turn_count: i
         "agentNotes": agent_notes or intel.agent_notes or "Scam engagement in progress."
     }
     
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Helware-Forensic-Platform/2.0"
+    }
+    
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, timeout=10.0)
+            response = await client.post(url, json=payload, headers=headers, timeout=10.0)
             if response.status_code == 200:
                 logger.info(f" Mandatory GUVI callback successful for session {session_id}")
             else:

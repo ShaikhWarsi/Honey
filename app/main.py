@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from typing import List, Dict, Optional
 import json
 
 from app.models.schemas import ScammerInput, ExtractedIntel
@@ -55,8 +56,18 @@ def verify_api_key(request: Request):
         raise HTTPException(status_code=403, detail="Invalid or Missing API Key")
     return api_key
 
-@app.get("/")
-async def health_check():
+@app.api_route("/", methods=["GET", "POST"])
+async def health_check(request: Request):
+    if request.method == "POST":
+        # If someone POSTs to root, treat it as a webhook call for compatibility
+        try:
+            body = await request.json()
+            # Basic validation to see if it looks like a ScammerInput
+            if "sessionId" in body or "session_id" in body:
+                return await chat_webhook(ScammerInput(**body), request)
+        except Exception:
+            pass
+            
     return {
         "status": "operational",
         "engine": "Forensic Intelligence Platform v2.0",
@@ -145,10 +156,19 @@ async def chat_webhook_stream(payload: ScammerInput, request: Request):
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-@app.post("/webhook")
-async def chat_webhook(payload: ScammerInput, request: Request):
+@app.api_route("/webhook", methods=["GET", "POST"])
+async def chat_webhook(payload: Optional[ScammerInput] = None, request: Request = None):
+    if request.method == "GET":
+        return {"status": "active", "message": "Webhook endpoint is ready for POST requests."}
+    
+    if payload is None:
+        try:
+            body = await request.json()
+            payload = ScammerInput(**body)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Invalid payload: {str(e)}")
+
     global graph
-    # API Key check (header strictly prioritized for rules.txt compliance)
     effective_api_key = request.headers.get("x-api-key") or payload.api_key
     if effective_api_key != settings.API_KEY:
         raise HTTPException(status_code=403, detail="Invalid API Key")
