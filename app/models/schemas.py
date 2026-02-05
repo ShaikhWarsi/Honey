@@ -22,8 +22,6 @@ class ScammerInput(BaseModel):
     
     # Internal flags
     generate_report: bool = Field(default=False, alias="generateReport")
-    human_intervention: bool = Field(default=False, alias="humanIntervention") 
-
 class ExtractedIntel(BaseModel):
     upi_ids: List[str] = []
     bank_details: List[str] = []

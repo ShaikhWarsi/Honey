@@ -1,6 +1,6 @@
 import os
 import sys
-from typing import Optional
+from typing import Optional, List
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
 
@@ -10,6 +10,10 @@ load_dotenv()
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Agentic Honey-Pot"
     GOOGLE_API_KEY: Optional[str] = os.getenv("GOOGLE_API_KEY")
+    # Support for multiple keys for rotation
+    GOOGLE_API_KEYS: List[str] = [
+        os.getenv(f"GOOGLE_API_KEY_{i}") for i in range(1, 7) if os.getenv(f"GOOGLE_API_KEY_{i}")
+    ]
     API_KEY: str = os.getenv("API_KEY", "helware-secret-key-2024")
     
     # For distributed tracing
@@ -55,8 +59,12 @@ class Settings(BaseSettings):
         return path
 
     def validate_keys(self):
-        if not self.GOOGLE_API_KEY:
-            print("WARNING: GOOGLE_API_KEY not found. LLM features will fail.")
+        # Merge primary key into the rotation list if not already present
+        if self.GOOGLE_API_KEY and self.GOOGLE_API_KEY not in self.GOOGLE_API_KEYS:
+            self.GOOGLE_API_KEYS.insert(0, self.GOOGLE_API_KEY)
+            
+        if not self.GOOGLE_API_KEYS:
+            print("WARNING: No GOOGLE_API_KEYS found. LLM features will fail.")
             # We don't exit(1) here to allow the app to start for non-LLM endpoints
 
 settings = Settings()

@@ -30,19 +30,12 @@ class HoneyDB:
                 CREATE TABLE IF NOT EXISTS sessions (
                     session_id TEXT PRIMARY KEY,
                     is_scam INTEGER DEFAULT 0,
-                    human_intervention INTEGER DEFAULT 0,
-                    manual_response TEXT,
                     created_at DATETIME
                 )
             """)
             
-            # Migration: Add columns if they don't exist
-            cursor = conn.execute("PRAGMA table_info(sessions)")
-            columns = [info[1] for info in cursor.fetchall()]
-            if "human_intervention" not in columns:
-                conn.execute("ALTER TABLE sessions ADD COLUMN human_intervention INTEGER DEFAULT 0")
-            if "manual_response" not in columns:
-                conn.execute("ALTER TABLE sessions ADD COLUMN manual_response TEXT")
+            # Migration: Ensure tables exist
+            pass
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS extracted_intel (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -210,29 +203,6 @@ class HoneyDB:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("SELECT type, value FROM extracted_intel WHERE session_id = ?", (session_id,))
             return [dict(r) for r in cursor.fetchall()]
-
-    async def set_human_intervention(self, session_id: str, enabled: bool, manual_response: str = None):
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(self.executor, self._set_human_intervention_sync, session_id, enabled, manual_response)
-
-    def _set_human_intervention_sync(self, session_id: str, enabled: bool, manual_response: str = None):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE sessions SET human_intervention = ?, manual_response = ? WHERE session_id = ?",
-                (1 if enabled else 0, manual_response, session_id)
-            )
-
-    async def get_intervention_state(self, session_id: str) -> Dict:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self.executor, self._get_intervention_state_sync, session_id)
-
-    def _get_intervention_state_sync(self, session_id: str) -> Dict:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            res = conn.execute("SELECT human_intervention, manual_response FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
-            if res:
-                return dict(res)
-            return {"human_intervention": 0, "manual_response": None}
 
     async def get_stats(self):
         loop = asyncio.get_event_loop()

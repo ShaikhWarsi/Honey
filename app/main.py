@@ -83,21 +83,6 @@ async def get_all_forensics():
     """Returns all extracted intelligence across all sessions for the dashboard."""
     return await db.get_all_intel()
 
-@app.post("/admin/intervention/{session_id}", dependencies=[Depends(verify_api_key)])
-async def toggle_intervention(session_id: str, enabled: bool = True, manual_response: str = None):
-    """
-    The 'Panic Button': Allows a judge/admin to take over the session.
-    - enabled: True to freeze AI and enable manual control.
-    - manual_response: The specific message to send to the scammer.
-    """
-    await db.set_human_intervention(session_id, enabled, manual_response)
-    return {
-        "status": "success", 
-        "session_id": session_id, 
-        "human_intervention": enabled,
-        "manual_response_queued": manual_response is not None
-    }
-
 @app.post("/webhook/stream")
 async def chat_webhook_stream(payload: ScammerInput, request: Request):
     """Streaming version of the webhook for better UX"""
@@ -128,9 +113,9 @@ async def chat_webhook_stream(payload: ScammerInput, request: Request):
                 "is_returning_scammer": False,
                 "syndicate_match_score": 0.0,
                 "generate_report": payload.generate_report,
-                "human_intervention": payload.human_intervention,
                 "report_url": None,
-                "turn_count": len(history)
+                "turn_count": len(history),
+                "metadata": payload.metadata.dict() if payload.metadata else {}
             }
 
             config = {"configurable": {"thread_id": payload.session_id}}
@@ -145,9 +130,17 @@ async def chat_webhook_stream(payload: ScammerInput, request: Request):
                             "reply": node_state["agent_response"],
                             "metadata": {
                                 "scam_detected": node_state.get("scam_detected", False),
-                                "priority": "HIGH" if node_state.get("high_priority") else "NORMAL"
+                                "priority": "HIGH" if node_state.get("high_priority") else "NORMAL",
+                                "syndicate_id": node_state.get("syndicate_id"),
+                                "vulnerability_level": node_state.get("vulnerability_level", 0.0),
+                                "turn_count": node_state.get("turn_count", 1)
                             }
                         }
+                        
+                        # Add report URL if generated
+                        if node_state.get("report_url"):
+                            final_data["report_url"] = node_state["report_url"]
+                            
                         yield f"data: {json.dumps(final_data)}\n\n"
 
         except Exception as e:
@@ -189,7 +182,7 @@ async def chat_webhook(payload: Optional[ScammerInput] = None, request: Request 
             "history": history,
             "turn_count": len(history),
             "generate_report": payload.generate_report,
-            "human_intervention": payload.human_intervention
+            "metadata": payload.metadata.dict() if payload.metadata else {}
         }
 
         # 2. Invoke Graph with persistent thread_id and TIMEOUT
@@ -199,7 +192,7 @@ async def chat_webhook(payload: Optional[ScammerInput] = None, request: Request 
             # Add a safety timeout to trigger the "Forensic Stall" if LLM is slow
             result_state = await asyncio.wait_for(
                 graph.ainvoke(initial_state, config=config), 
-                timeout=12.0 # Wait up to 12s for heavy Multi-Agent logic
+                timeout=30.0 # Wait up to 30s for heavy Multi-Agent logic
             )
             reply = result_state["agent_response"]
         except asyncio.TimeoutError:
@@ -214,10 +207,25 @@ async def chat_webhook(payload: Optional[ScammerInput] = None, request: Request 
             reply = error_responses.get("RAJESH", "Hello? Beta, my internet is very slow today. One moment...")
 
         # 3. RESTful Response (STRICTLY matching rules.txt Section 8)
-        return {
+        final_response = {
             "status": "success",
             "reply": reply
         }
+
+        # Add metadata and report if we have result_state (success path)
+        if 'result_state' in locals():
+            final_response["metadata"] = {
+                "scam_detected": result_state.get("scam_detected", False),
+                "priority": "HIGH" if result_state.get("high_priority") else "NORMAL",
+                "syndicate_id": result_state.get("syndicate_id"),
+                "vulnerability_level": result_state.get("vulnerability_level", 0.0),
+                "turn_count": result_state.get("turn_count", 1),
+                "takedown_status": "REQUESTED" if result_state.get("scam_detected") and result_state.get("intel").phishing_links else "N/A"
+            }
+            if result_state.get("report_url"):
+                final_response["report_url"] = result_state["report_url"]
+
+        return final_response
 
     except Exception as e:
         logger.error(f"❌ Webhook Critical Error: {e}", exc_info=True)

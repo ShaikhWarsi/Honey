@@ -2,7 +2,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from app.engine.nodes import (
     AgentState, load_history, detect_scam, 
-    extract_intel, save_state, finalize_report,
+    extract_forensics, save_state, finalize_report,
     enrich_intel, fingerprint_scammer, submit_to_blacklist,
     guvi_reporting
 )
@@ -10,12 +10,12 @@ from app.engine.nodes import (
 def route_after_detection(state: AgentState):
     """
     Dynamic routing for True Agency:
-    - If High Priority Intel detected: Skip small talk, go straight to enrichment.
+    - If High Priority Intel detected: Skip small talk, go straight to forensics & enrichment.
     - If Scam detected: Go to forensics.
     - Otherwise: Persist state and wait for next message.
     """
     if state.get("high_priority"):
-        return "enrich_intelligence"
+        return "extract_forensics"
     if state.get("scam_detected"):
         return "extract_forensics"
     return "persist_state"
@@ -25,7 +25,7 @@ def build_workflow():
 
     workflow.add_node("load_history", load_history)
     workflow.add_node("process_interaction", detect_scam)
-    workflow.add_node("extract_forensics", extract_intel)
+    workflow.add_node("extract_forensics", extract_forensics)
     workflow.add_node("enrich_intelligence", enrich_intel)
     workflow.add_node("fingerprint_scammer", fingerprint_scammer)
     workflow.add_node("submit_to_blacklist", submit_to_blacklist)
