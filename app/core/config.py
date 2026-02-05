@@ -12,17 +12,23 @@ class Settings(BaseSettings):
     GOOGLE_API_KEY: Optional[str] = os.getenv("GOOGLE_API_KEY")
     API_KEY: str = os.getenv("API_KEY", "helware-secret-key-2024")
     
-    # STARTUP-GRADE SCALABILITY CONFIG
-    # In production, swap SQLite for PostgreSQL
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///honey.db")
     # For distributed tracing
     SENTRY_DSN: Optional[str] = os.getenv("SENTRY_DSN")
     # Log level for structured logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     
+    @property
+    def DATABASE_URL(self) -> str:
+        return f"sqlite:///{self.DATABASE_PATH}"
+    
     # Hugging Face compatibility: Use /tmp if SPACE_ID is set (HF Spaces)
     IS_HF: bool = os.getenv("SPACE_ID") is not None
-    BASE_DATA_DIR: str = "/tmp/helware_data" if os.getenv("SPACE_ID") else os.getcwd()
+    
+    @property
+    def BASE_DATA_DIR(self) -> str:
+        if self.IS_HF:
+            return "/tmp/helware_data"
+        return os.getcwd()
     
     @property
     def DATABASE_PATH(self) -> str:

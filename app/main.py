@@ -26,7 +26,7 @@ graph = None
 async def lifespan(app: FastAPI):
     global graph
     # Using AsyncSqliteSaver for startup-grade persistence
-    async with AsyncSqliteSaver.from_conn_string("db/checkpoints.sqlite") as saver:
+    async with AsyncSqliteSaver.from_conn_string(settings.CHECKPOINT_DB_PATH) as saver:
         # Build and compile graph
         workflow = build_workflow()
         graph = workflow.compile(checkpointer=saver)
